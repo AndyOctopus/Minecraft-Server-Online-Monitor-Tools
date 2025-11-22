@@ -7,7 +7,6 @@ import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
-import java.io.File;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.time.LocalTime;
@@ -30,17 +29,17 @@ public class MainFrame extends JFrame {
     public MainFrame() {
         setTitle("MC Server Monitor (Pro Edition)");
         setSize(800, 500);
-        // 这里改成 DO_NOTHING，因为我们要自己接管关闭事件（最小化到托盘）
+        // 关键修改：点击关闭按钮时不默认退出，而是什么都不做（交给我们自己的监听器处理）
         setDefaultCloseOperation(JFrame.DO_NOTHING_ON_CLOSE);
         setLocationRelativeTo(null);
 
-        // 1. 初始化系统托盘 (带右键菜单)
+        // 1. 初始化系统托盘 (核心：处理最小化图标和通知)
         initSystemTray();
 
-        // 2. 初始化窗口监听 (处理最小化/关闭逻辑)
+        // 2. 初始化窗口监听 (核心：处理点击关闭按钮变为隐藏)
         initWindowListeners();
 
-        // 3. 初始化菜单栏 (开机自启)
+        // 3. 初始化菜单栏 (开机自启功能)
         initMenuBar();
 
         // --- 加载数据 ---
@@ -126,29 +125,24 @@ public class MainFrame extends JFrame {
         scheduler.scheduleAtFixedRate(this::runChecks, 0, 10, TimeUnit.SECONDS);
     }
 
-    // --- 新增功能区 ---
+    // ---------------------------------------------------------
+    // 新增功能实现区域
+    // ---------------------------------------------------------
 
     /**
-     * 初始化窗口监听器：拦截关闭按钮，改为最小化到托盘
+     * 初始化窗口监听器：拦截关闭按钮，改为隐藏到托盘
      */
     private void initWindowListeners() {
         addWindowListener(new WindowAdapter() {
             @Override
             public void windowClosing(WindowEvent e) {
-                // 点击 X 时，隐藏窗口，不退出程序
+                // 如果系统支持托盘，则隐藏窗口（最小化到托盘效果）
                 if (SystemTray.isSupported()) {
                     setVisible(false);
-                    // 第一次隐藏时可以发个通知告诉用户去哪里找
-                    // sendNotification("程序已隐藏", "MC监控正在后台运行，双击托盘图标恢复。");
                 } else {
+                    // 不支持托盘则直接退出
                     System.exit(0);
                 }
-            }
-
-            @Override
-            public void windowIconified(WindowEvent e) {
-                // 如果你希望点击最小化按钮也隐藏任务栏图标，可以在这里 setVisible(false)
-                // 这里保留默认行为（最小化到任务栏）
             }
         });
     }
@@ -162,12 +156,12 @@ public class MainFrame extends JFrame {
 
         JCheckBoxMenuItem autoStartItem = new JCheckBoxMenuItem("开机自启动");
 
-        // 检查当前是否已经是开机自启状态 (通过注册表检查比较复杂，这里简单处理：默认未选中，由用户操作)
-        // 如果是在 IDE 中运行，获取不到实际 EXE 路径，禁用此功能
+        // 获取 jpackage 打包后的路径。如果在 IDE 中运行，此值为 null
         String appPath = System.getProperty("jpackage.app-path");
+
         if (appPath == null) {
             autoStartItem.setEnabled(false);
-            autoStartItem.setToolTipText("请打包成 Exe 后使用此功能");
+            autoStartItem.setToolTipText("此功能仅在打包为 EXE 后可用");
         }
 
         autoStartItem.addActionListener(e -> {
@@ -180,7 +174,7 @@ public class MainFrame extends JFrame {
     }
 
     /**
-     * 开机自启逻辑 (操作 Windows 注册表)
+     * 执行开机自启注册表修改
      */
     private void toggleAutoStart(boolean enable) {
         String appPath = System.getProperty("jpackage.app-path");
@@ -189,16 +183,13 @@ public class MainFrame extends JFrame {
         String cmd;
         try {
             if (enable) {
-                // 添加注册表: reg add HKCU\...\Run /v "AppName" /d "Path" /f
+                // 注册表添加启动项
                 cmd = String.format("reg add \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"McMonitor\" /d \"%s\" /f", appPath);
             } else {
-                // 删除注册表: reg delete HKCU\...\Run /v "AppName" /f
+                // 注册表删除启动项
                 cmd = "reg delete \"HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run\" /v \"McMonitor\" /f";
             }
-
-            // 执行 CMD 命令
             Runtime.getRuntime().exec(cmd);
-
         } catch (Exception e) {
             e.printStackTrace();
             JOptionPane.showMessageDialog(this, "设置开机自启失败: " + e.getMessage());
@@ -206,42 +197,59 @@ public class MainFrame extends JFrame {
     }
 
     /**
-     * 初始化托盘图标及右键菜单
+     * 初始化系统托盘
      */
     private void initSystemTray() {
         if (!SystemTray.isSupported()) return;
         try {
             var tray = SystemTray.getSystemTray();
-            // 绘制一个简单的图标 (如果有 icon.png 请替换 ImageIO.read(...))
-            var image = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-            var g = image.createGraphics();
-            g.setColor(new Color(60, 179, 113)); // MC Green
-            g.fillRect(0, 0, 16, 16);
-            g.dispose();
 
-            // 创建右键弹出菜单
+            // 定义一个最终使用的 Image 变量
+            Image finalImage;
+
+            // 尝试加载自定义图标
+            java.net.URL imgUrl = getClass().getResource("/app.png");
+
+            if (imgUrl != null) {
+                // 如果找到了图片，直接加载为 Image
+                finalImage = Toolkit.getDefaultToolkit().getImage(imgUrl);
+            } else {
+                // 如果没找到图片，手动绘制一个
+                // 修复点：显式使用 BufferedImage 类型，确保 createGraphics() 方法可用
+                var bufferedImage = new java.awt.image.BufferedImage(16, 16, java.awt.image.BufferedImage.TYPE_INT_ARGB);
+                var g = bufferedImage.createGraphics();
+                g.setColor(new Color(60, 179, 113));
+                g.fillRect(0, 0, 16, 16);
+                g.dispose();
+
+                // 将绘制好的 BufferedImage 赋值给最终变量
+                finalImage = bufferedImage;
+            }
+
+            // 创建右键菜单
             PopupMenu popup = new PopupMenu();
-            MenuItem showItem = new MenuItem("Show Monitor");
-            MenuItem exitItem = new MenuItem("Exit");
+            MenuItem showItem = new MenuItem("显示主界面");
+            MenuItem exitItem = new MenuItem("退出程序");
 
             showItem.addActionListener(e -> {
                 setVisible(true);
-                setExtendedState(JFrame.NORMAL);
-                toFront();
+                setExtendedState(JFrame.NORMAL); // 恢复正常大小
+                toFront(); // 置顶
             });
 
             exitItem.addActionListener(e -> {
-                System.exit(0);
+                System.exit(0); // 彻底退出
             });
 
             popup.add(showItem);
             popup.addSeparator();
             popup.add(exitItem);
 
-            trayIcon = new TrayIcon(image, "MC Monitor", popup);
+            // 使用最终确定的 finalImage
+            trayIcon = new TrayIcon(finalImage, "MC Monitor", popup);
             trayIcon.setImageAutoSize(true);
 
-            // 双击托盘图标打开窗口
+            // 双击托盘图标恢复窗口
             trayIcon.addMouseListener(new MouseAdapter() {
                 @Override
                 public void mouseClicked(MouseEvent e) {
@@ -259,7 +267,9 @@ public class MainFrame extends JFrame {
         }
     }
 
-    // --- 核心逻辑区 (包含修改后的离线提醒) ---
+    // ---------------------------------------------------------
+    // 核心检测逻辑
+    // ---------------------------------------------------------
 
     private void runChecks() {
         if (serverList.isEmpty()) return;
@@ -285,13 +295,14 @@ public class MainFrame extends JFrame {
 
         // 状态发生改变
         if (isOnlineNow != wasOnline) {
+            // 只有不是第一次启动检测时，才弹窗
             if (!isFirst) {
                 if (isOnlineNow) {
-                    // 上线通知 (蓝色 INFO)
+                    // 离线 -> 在线 (蓝色 INFO)
                     sendNotification("服务器上线啦！",
                             "[" + server.getName() + "] 终于上线了，快去连接吧！", TrayIcon.MessageType.INFO);
                 } else {
-                    // 掉线通知 (黄色 WARNING)
+                    // 在线 -> 离线 (黄色 WARNING)
                     sendNotification("服务器掉线了...",
                             "[" + server.getName() + "] 刚刚断开了连接。", TrayIcon.MessageType.WARNING);
                 }
@@ -318,7 +329,7 @@ public class MainFrame extends JFrame {
                         s.getName(),
                         s.getIp(),
                         s.getPort(),
-                        s.isOnline() ? "🟢 在线" : "🔴 离线",
+                        s.isOnline() ? "√ 在线" : "× 离线",
                         s.isFirstCheck() ? "等待检测..." : timeStr
                 });
             }
